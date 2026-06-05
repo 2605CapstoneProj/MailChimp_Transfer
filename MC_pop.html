@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: Arial, sans-serif; }
+    body { padding: 16px; font-size: 14px; color: #333; background: #fff; }
+
+    h3 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+    .subtitle { font-size: 12px; color: #888; margin-bottom: 14px; }
+
+    .section-title {
+      font-size: 11px; font-weight: 600; color: #777;
+      text-transform: uppercase; letter-spacing: 0.05em;
+      margin: 14px 0 6px;
+    }
+
+    /* Filter groups */
+    .filter-group {
+      border: 1px solid #e5e5e5; border-radius: 6px;
+      padding: 10px 12px; margin-bottom: 8px;
+    }
+    .filter-group-name { font-size: 13px; font-weight: 600; color: #444; margin-bottom: 8px; }
+
+    .checkbox-row {
+      display: flex; align-items: center; gap: 8px;
+      padding: 3px 0; cursor: pointer;
+    }
+    .checkbox-row input { cursor: pointer; flex-shrink: 0; }
+    .checkbox-row .val { flex: 1; font-size: 13px; }
+    .count { font-size: 12px; color: #aaa; }
+    .count.low {
+      color: #d97706;
+      font-style: italic;
+    }
+    .low-hint {
+      font-size: 11px; color: #d97706; margin-top: 6px;
+      padding: 4px 8px; background: #fffbeb;
+      border-radius: 4px; border-left: 3px solid #d97706;
+    }
+
+    /* Preview bar */
+    .preview-bar {
+      display: flex; gap: 0;
+      border: 1px solid #e5e5e5; border-radius: 6px;
+      overflow: hidden; margin-bottom: 14px;
+    }
+    .preview-cell {
+      flex: 1; padding: 10px 14px; background: #f9f9f9;
+      border-right: 1px solid #e5e5e5; text-align: center;
+    }
+    .preview-cell:last-child { border-right: none; }
+    .preview-num { font-size: 20px; font-weight: 600; color: #333; }
+    .preview-label { font-size: 11px; color: #888; margin-top: 1px; }
+    .preview-num.warn { color: #d97706; }
+
+    /* Tag input */
+    input[type="text"] {
+      width: 100%; padding: 7px 10px;
+      border: 1px solid #ddd; border-radius: 6px;
+      font-size: 13px; color: #333;
+    }
+    input[type="text"]:focus { outline: none; border-color: #888; }
+    .tag-hint { font-size: 11px; color: #aaa; margin-top: 4px; }
+
+    /* Sync button */
+    #sync-btn {
+      width: 100%; padding: 10px;
+      border-radius: 6px; border: 1px solid #ccc;
+      background: #fff; font-size: 14px; font-weight: 500;
+      cursor: pointer; margin-top: 14px;
+      transition: background 0.1s;
+    }
+    #sync-btn:hover:not(:disabled) { background: #f5f5f5; }
+    #sync-btn:disabled { opacity: 0.45; cursor: default; }
+    #sync-btn.done { border-color: #6abf8a; color: #276b45; background: #edf7f1; }
+
+    /* Result messages */
+    #result-msg { font-size: 13px; margin-top: 10px; color: #333; }
+    #error-list {
+      font-size: 12px; color: #c0392b; margin-top: 6px;
+      max-height: 80px; overflow-y: auto;
+      background: #fef2f2; padding: 6px 8px;
+      border-radius: 4px; border-left: 3px solid #f87171;
+      display: none;
+    }
+
+    .loading { color: #888; font-style: italic; font-size: 13px; padding: 20px 0; }
+    .err-load { color: #c0392b; font-size: 13px; padding: 20px 0; }
+  </style>
+</head>
+<body>
+
+<h3>📋 Campaign Launcher</h3>
+<div class="subtitle">Filter contacts → preview → sync to Mailchimp</div>
+
+<div id="loading" class="loading">Loading filter options…</div>
+<div id="err-load" class="err-load" style="display:none"></div>
+
+<div id="main" style="display:none">
+
+  <div class="section-title">Filters <span style="font-weight:400;color:#aaa">(OR within group, AND across groups)</span></div>
+  <div id="filter-groups"></div>
+
+  <div class="section-title">Preview</div>
+  <div class="preview-bar">
+    <div class="preview-cell">
+      <div class="preview-num" id="prev-total">—</div>
+      <div class="preview-label">Matched</div>
+    </div>
+    <div class="preview-cell">
+      <div class="preview-num" id="prev-email">—</div>
+      <div class="preview-label">With email</div>
+    </div>
+    <div class="preview-cell">
+      <div class="preview-num warn" id="prev-noemail">—</div>
+      <div class="preview-label">No email (skipped)</div>
+    </div>
+  </div>
+
+  <div class="section-title">Campaign tag</div>
+  <input type="text" id="tag-input" placeholder="e.g. machine-buyer, june-2026" />
+  <div class="tag-hint">Comma-separated. These tags are applied to each synced contact in MC.</div>
+
+  <button id="sync-btn" onclick="doSync()" disabled>Sync to Mailchimp</button>
+
+  <div id="result-msg"></div>
+  <div id="error-list"></div>
+
+</div>
+
+<script>
+  var LOW_COUNT_FLAG = 3;
+
+  // ── Load filter options on dialog open ──────────────────────
+  google.script.run
+    .withSuccessHandler(function(res) {
+      LOW_COUNT_FLAG = res.lowCountFlag;
+      buildFilterUI(res.options);
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('main').style.display    = 'block';
+      updatePreview();
+    })
+    .withFailureHandler(function(err) {
+      document.getElementById('loading').style.display  = 'none';
+      var el = document.getElementById('err-load');
+      el.style.display = 'block';
+      el.textContent   = '⚠️ Could not load filters: ' + err.message;
+    })
+    .getFilterOptions();
+
+
+  // ── Build checkbox UI from options ──────────────────────────
+  function buildFilterUI(options) {
+    var container = document.getElementById('filter-groups');
+
+    Object.keys(options).forEach(function(colName) {
+      var values  = options[colName];
+      var hasLow  = values.some(function(v) { return v.count <= LOW_COUNT_FLAG; });
+      var group   = document.createElement('div');
+      group.className = 'filter-group';
+
+      var title = document.createElement('div');
+      title.className   = 'filter-group-name';
+      title.textContent = colName;
+      group.appendChild(title);
+
+      values.forEach(function(item) {
+        var row   = document.createElement('label');
+        row.className = 'checkbox-row';
+
+        var cb = document.createElement('input');
+        cb.type           = 'checkbox';
+        cb.dataset.col    = colName;
+        cb.value          = item.value;
+        cb.addEventListener('change', updatePreview);
+
+        var valSpan = document.createElement('span');
+        valSpan.className   = 'val';
+        valSpan.textContent = item.value;
+
+        var countSpan = document.createElement('span');
+        countSpan.className   = 'count' + (item.count <= LOW_COUNT_FLAG ? ' low' : '');
+        countSpan.textContent = '(' + item.count + ')';
+
+        row.appendChild(cb);
+        row.appendChild(valSpan);
+        row.appendChild(countSpan);
+        group.appendChild(row);
+      });
+
+      if (hasLow) {
+        var hint = document.createElement('div');
+        hint.className   = 'low-hint';
+        hint.textContent = '⚠️ Values with low count may be typos — check the sheet.';
+        group.appendChild(hint);
+      }
+
+      container.appendChild(group);
+    });
+  }
+
+
+  // ── Collect currently selected filters ──────────────────────
+  function getSelectedFilters() {
+    var filters = {};
+    var checked = document.querySelectorAll('input[type="checkbox"]:checked');
+    checked.forEach(function(cb) {
+      var col = cb.dataset.col;
+      if (!filters[col]) filters[col] = [];
+      filters[col].push(cb.value);
+    });
+    return filters;
+  }
+
+
+  // ── Preview (debounced) ─────────────────────────────────────
+  var previewTimer = null;
+  function updatePreview() {
+    clearTimeout(previewTimer);
+    document.getElementById('prev-total').textContent   = '…';
+    document.getElementById('prev-email').textContent   = '…';
+    document.getElementById('prev-noemail').textContent = '…';
+    document.getElementById('sync-btn').disabled = true;
+
+    previewTimer = setTimeout(function() {
+      var filters = getSelectedFilters();
+      google.script.run
+        .withSuccessHandler(function(result) {
+          document.getElementById('prev-total').textContent   = result.total;
+          document.getElementById('prev-email').textContent   = result.withEmail;
+          document.getElementById('prev-noemail').textContent = result.noEmail;
+          var btn = document.getElementById('sync-btn');
+          btn.disabled    = result.withEmail === 0;
+          btn.textContent = 'Sync ' + result.withEmail + ' contacts to Mailchimp';
+        })
+        .withFailureHandler(function(err) {
+          document.getElementById('prev-total').textContent = 'Error';
+          console.error(err.message);
+        })
+        .previewContacts(filters);
+    }, 400);
+  }
+
+
+  // ── Sync button ─────────────────────────────────────────────
+  function doSync() {
+    var filters = getSelectedFilters();
+    var tag     = document.getElementById('tag-input').value.trim();
+    var btn     = document.getElementById('sync-btn');
+    var msgEl   = document.getElementById('result-msg');
+    var errEl   = document.getElementById('error-list');
+
+    btn.disabled    = true;
+    btn.textContent = 'Syncing…';
+    msgEl.textContent = '';
+    errEl.style.display = 'none';
+    errEl.textContent   = '';
+
+    google.script.run
+      .withSuccessHandler(function(result) {
+        btn.textContent = '✓ Done';
+        btn.className   = 'done';
+        msgEl.innerHTML =
+          '✅ Synced <strong>' + result.synced + '</strong> contacts.' +
+          (result.skipped > 0 ? ' Skipped: ' + result.skipped + '.' : '');
+
+        if (result.errors && result.errors.length > 0) {
+          errEl.textContent   = 'Issues:\n' + result.errors.join('\n');
+          errEl.style.display = 'block';
+        }
+      })
+      .withFailureHandler(function(err) {
+        btn.disabled    = false;
+        btn.textContent = 'Retry sync';
+        msgEl.textContent = '❌ Error: ' + err.message;
+      })
+      .syncToMailchimp(filters, tag);
+  }
+</script>
+</body>
+</html>
