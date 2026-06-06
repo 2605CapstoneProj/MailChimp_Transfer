@@ -1,5 +1,5 @@
 // ============================================================
-//  CAMPAIGN LAUNCHER — MC_logic.gs
+//  CAMPAIGN LAUNCHER — Code.gs
 //  Syncs filtered GSheet contacts to Mailchimp via API
 // ============================================================
 
@@ -8,22 +8,25 @@
 //  CONFIG — edit this section before deploying
 // ============================================================
 const CONFIG = {
-  MC_API_KEY:    'YOUR_MC_API_KEY',         // e.g. 'abc123def456-us1'
-  MC_LIST_ID:    'YOUR_AUDIENCE_LIST_ID',   // MC > Audience > Settings > Audience ID
+  MC_API_KEY:  'YOUR_MC_API_KEY',       // e.g. 'abc123def456-us1'
+  MC_LIST_ID:  'YOUR_AUDIENCE_LIST_ID', // MC > Audience > Settings > Audience ID
 
-  SHEET_NAME:    'Active Leads',            // tab name to read contacts from
+  // Leave null if this script is bound directly to the sheet (normal case).
+  // Fill in the Spreadsheet ID only if the script lives in a different GSheet file.
+  SPREADSHEET_ID: null,                 // e.g. '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms'
 
-  // Column header names — must match sheet exactly (case-sensitive)
-  COL_EMAIL:     'Email Address',
-  COL_FNAME:     'First Name',
-  COL_LNAME:     'Last Name',
-  COL_COMPANY:   'Company',
+  SHEET_NAME: 'Active Leads',           // exact tab name
 
-  // Columns to expose as filters in the popup
-  // Only use "clean" columns with consistent dropdown-style values
+  // ── Contact column headers (must match sheet exactly, case-sensitive) ──
+  COL_EMAIL:   'Email Address',
+  COL_NAME:    'Name',        // single full-name column → maps to FNAME in MC
+  COL_COMPANY: 'Company',     // set to null if there is no company column
+
+  // ── Columns to show as filters in the popup ──
+  // Use only columns with consistent, limited values (dropdown-style)
   FILTERABLE_COLS: ['Machine Type', 'Priority', 'State'],
 
-  // Low count threshold — values with count <= this are flagged as possible typos
+  // Values with count ≤ this are flagged amber as possible typos in the UI
   LOW_COUNT_FLAG: 3,
 
   LOG_SHEET_NAME: 'Sync Log',
@@ -31,7 +34,7 @@ const CONFIG = {
 
 
 // ============================================================
-//  MENU — adds "Campaign Launcher" to the GSheet toolbar
+//  MENU
 // ============================================================
 function onOpen() {
   SpreadsheetApp.getUi()
@@ -42,7 +45,7 @@ function onOpen() {
 
 
 // ============================================================
-//  OPEN DIALOG
+//  OPEN SIDEBAR DIALOG
 // ============================================================
 function openLauncher() {
   const html = HtmlService.createHtmlOutputFromFile('Dialog')
@@ -53,13 +56,24 @@ function openLauncher() {
 
 
 // ============================================================
+//  WEB APP ENTRY POINT — for MC Test Panel
+//  Deploy as Web App: Execute as "Me", Access "Only myself"
+//  Then open the /exec URL in browser
+// ============================================================
+function doGet() {
+  return HtmlService.createHtmlOutputFromFile('TestPanel')
+    .setTitle('MC Test Panel')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.DEFAULT);
+}
+
+
+// ============================================================
 //  GET FILTER OPTIONS
-//  Called from Dialog on load.
-//  Returns: { "Machine Type": [{value, count}, ...], ... }
+//  Returns: { options: { "Col": [{value, count}] }, lowCountFlag }
 // ============================================================
 function getFilterOptions() {
-  const sheet = _getSheet();
-  const data  = sheet.getDataRange().getValues();
+  const sheet   = _getSheet();
+  const data    = sheet.getDataRange().getValues();
   const headers = data[0];
   const rows    = data.slice(1);
 
@@ -67,7 +81,7 @@ function getFilterOptions() {
 
   CONFIG.FILTERABLE_COLS.forEach(colName => {
     const colIdx = headers.indexOf(colName);
-    if (colIdx === -1) return; // column not found — skip silently
+    if (colIdx === -1) return;
 
     const counts = {};
     rows.forEach(row => {
@@ -76,7 +90,6 @@ function getFilterOptions() {
       counts[val] = (counts[val] || 0) + 1;
     });
 
-    // Sort by count descending so most common values appear first
     result[colName] = Object.entries(counts)
       .sort((a, b) => b[1] - a[1])
       .map(([value, count]) => ({ value, count }));
@@ -88,31 +101,24 @@ function getFilterOptions() {
 
 // ============================================================
 //  PREVIEW COUNT
-//  Called from Dialog when filter selection changes.
-//  filters: { "Machine Type": ["A","B"], "Priority": ["1"] }
 //  Returns: { total, withEmail, noEmail }
 // ============================================================
 function previewContacts(filters) {
   const all = _getMatchedContacts(filters);
   const withEmail = all.filter(c => c.email).length;
-  return {
-    total:     all.length,
-    withEmail: withEmail,
-    noEmail:   all.length - withEmail,
-  };
+  return { total: all.length, withEmail, noEmail: all.length - withEmail };
 }
 
 
 // ============================================================
 //  SYNC TO MAILCHIMP
-//  Called from Dialog on sync button click.
 //  Returns: { synced, skipped, errors[] }
 // ============================================================
 function syncToMailchimp(filters, campaignTag) {
   const contacts = _getMatchedContacts(filters).filter(c => c.email);
   if (contacts.length === 0) return { synced: 0, skipped: 0, errors: [] };
 
-  const dc      = CONFIG.MC_API_KEY.split('-').pop();         // e.g. 'us1'
+  const dc      = CONFIG.MC_API_KEY.split('-').pop();
   const baseUrl = `https://${dc}.api.mailchimp.com/3.0/lists/${CONFIG.MC_LIST_ID}/members`;
   const auth    = 'Basic ' + Utilities.base64Encode('anystring:' + CONFIG.MC_API_KEY);
   const tags    = campaignTag
@@ -125,24 +131,23 @@ function syncToMailchimp(filters, campaignTag) {
   contacts.forEach(contact => {
     try {
       const emailHash = _md5(contact.email);
-
-      const payload = {
+      const payload   = {
         email_address: contact.email,
-        status_if_new: 'subscribed',  // only sets status for brand-new contacts
+        status_if_new: 'subscribed',
         merge_fields:  {},
       };
-      if (contact.fname)   payload.merge_fields.FNAME   = contact.fname;
-      if (contact.lname)   payload.merge_fields.LNAME   = contact.lname;
+
+      if (contact.name)    payload.merge_fields.FNAME   = contact.name;
       if (contact.company) payload.merge_fields.COMPANY = contact.company;
 
-      const res = UrlFetchApp.fetch(`${baseUrl}/${emailHash}`, {
-        method:            'PUT',
-        headers:           { 'Authorization': auth, 'Content-Type': 'application/json' },
-        payload:           JSON.stringify(payload),
+      const res  = UrlFetchApp.fetch(`${baseUrl}/${emailHash}`, {
+        method:             'PUT',
+        headers:            { 'Authorization': auth, 'Content-Type': 'application/json' },
+        payload:            JSON.stringify(payload),
         muteHttpExceptions: true,
       });
-
       const code = res.getResponseCode();
+
       if (code === 200 || code === 201) {
         if (tags.length > 0) _applyTags(emailHash, tags, auth, dc);
         synced++;
@@ -158,29 +163,111 @@ function syncToMailchimp(filters, campaignTag) {
   });
 
   _writeLog(filters, campaignTag, contacts.length, synced, skipped, errors);
-
   return { synced, skipped, errors };
 }
 
 
 // ============================================================
-//  INTERNAL — apply tags to a contact (separate MC endpoint)
+//  TEST PANEL FUNCTIONS (called from TestPanel.html)
 // ============================================================
-function _applyTags(emailHash, tags, auth, dc) {
-  const url = `https://${dc}.api.mailchimp.com/3.0/lists/${CONFIG.MC_LIST_ID}/members/${emailHash}/tags`;
-  UrlFetchApp.fetch(url, {
-    method:            'POST',
-    headers:           { 'Authorization': auth, 'Content-Type': 'application/json' },
-    payload:           JSON.stringify({ tags: tags.map(name => ({ name, status: 'active' })) }),
-    muteHttpExceptions: true,
+
+/** Verify API key — returns account name + plan */
+function testGetAccount() {
+  const { auth, dc } = _mcAuth();
+  const res  = UrlFetchApp.fetch(`https://${dc}.api.mailchimp.com/3.0/`, {
+    headers: { 'Authorization': auth }, muteHttpExceptions: true,
   });
+  const body = JSON.parse(res.getContentText());
+  if (res.getResponseCode() !== 200) throw new Error(body.detail || 'Auth failed');
+  return {
+    account_name: body.account_name,
+    email:        body.email,
+    plan:         body.account_industry || '—',
+  };
+}
+
+/** List all audiences — use this to find your MC_LIST_ID */
+function testListAudiences() {
+  const { auth, dc } = _mcAuth();
+  const res  = UrlFetchApp.fetch(
+    `https://${dc}.api.mailchimp.com/3.0/lists?count=20&fields=lists.id,lists.name,lists.stats.member_count`,
+    { headers: { 'Authorization': auth }, muteHttpExceptions: true }
+  );
+  const body = JSON.parse(res.getContentText());
+  if (res.getResponseCode() !== 200) throw new Error(body.detail || 'Failed to fetch audiences');
+  return body.lists.map(l => ({
+    id:      l.id,
+    name:    l.name,
+    members: l.stats.member_count,
+  }));
+}
+
+/** Look up a single contact by email */
+function testFindContact(email) {
+  const { auth, dc } = _mcAuth();
+  const hash = _md5(email.trim().toLowerCase());
+  const res  = UrlFetchApp.fetch(
+    `https://${dc}.api.mailchimp.com/3.0/lists/${CONFIG.MC_LIST_ID}/members/${hash}` +
+    `?fields=email_address,status,merge_fields,tags`,
+    { headers: { 'Authorization': auth }, muteHttpExceptions: true }
+  );
+  const body = JSON.parse(res.getContentText());
+  if (res.getResponseCode() === 404) return { found: false };
+  if (res.getResponseCode() !== 200) throw new Error(body.detail || 'Lookup failed');
+  return {
+    found:    true,
+    email:    body.email_address,
+    status:   body.status,
+    name:     body.merge_fields?.FNAME || '—',
+    company:  body.merge_fields?.COMPANY || '—',
+    tags:     (body.tags || []).map(t => t.name),
+  };
+}
+
+/** Add a test contact to verify sync works end-to-end */
+function testAddContact(email, name) {
+  const { auth, dc } = _mcAuth();
+  const hash    = _md5(email.trim().toLowerCase());
+  const payload = {
+    email_address: email.trim().toLowerCase(),
+    status_if_new: 'subscribed',
+    merge_fields:  { FNAME: name || 'Test Contact' },
+  };
+  const res  = UrlFetchApp.fetch(
+    `https://${dc}.api.mailchimp.com/3.0/lists/${CONFIG.MC_LIST_ID}/members/${hash}`,
+    {
+      method:             'PUT',
+      headers:            { 'Authorization': auth, 'Content-Type': 'application/json' },
+      payload:            JSON.stringify(payload),
+      muteHttpExceptions: true,
+    }
+  );
+  const code = res.getResponseCode();
+  const body = JSON.parse(res.getContentText());
+  if (code !== 200 && code !== 201) throw new Error(body.detail || 'HTTP ' + code);
+  return { ok: true, status: body.status, email: body.email_address };
 }
 
 
 // ============================================================
-//  INTERNAL — get matched + deduped contacts from sheet
-//  Filter logic: AND across columns, OR within a column
+//  INTERNAL — helpers
 // ============================================================
+
+function _mcAuth() {
+  const dc   = CONFIG.MC_API_KEY.split('-').pop();
+  const auth = 'Basic ' + Utilities.base64Encode('anystring:' + CONFIG.MC_API_KEY);
+  return { auth, dc };
+}
+
+function _getSheet() {
+  const ss = CONFIG.SPREADSHEET_ID
+    ? SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID)
+    : SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(CONFIG.SHEET_NAME);
+  if (!sheet) throw new Error(`Sheet "${CONFIG.SHEET_NAME}" not found. Check SHEET_NAME in CONFIG.`);
+  return sheet;
+}
+
 function _getMatchedContacts(filters) {
   const sheet   = _getSheet();
   const data    = sheet.getDataRange().getValues();
@@ -188,17 +275,15 @@ function _getMatchedContacts(filters) {
   const rows    = data.slice(1);
 
   const emailIdx   = headers.indexOf(CONFIG.COL_EMAIL);
-  const fnameIdx   = headers.indexOf(CONFIG.COL_FNAME);
-  const lnameIdx   = headers.indexOf(CONFIG.COL_LNAME);
-  const companyIdx = headers.indexOf(CONFIG.COL_COMPANY);
+  const nameIdx    = CONFIG.COL_NAME    ? headers.indexOf(CONFIG.COL_NAME)    : -1;
+  const companyIdx = CONFIG.COL_COMPANY ? headers.indexOf(CONFIG.COL_COMPANY) : -1;
 
   const seen    = new Set();
   const matched = [];
 
   rows.forEach(row => {
-    // Must pass ALL filter groups (AND logic across columns)
     const passes = Object.entries(filters).every(([colName, selectedVals]) => {
-      if (!selectedVals || selectedVals.length === 0) return true; // no selection = no restriction
+      if (!selectedVals || selectedVals.length === 0) return true;
       const idx = headers.indexOf(colName);
       if (idx === -1) return true;
       return selectedVals.includes(String(row[idx]).trim());
@@ -206,20 +291,16 @@ function _getMatchedContacts(filters) {
 
     if (!passes) return;
 
-    const rawEmail = emailIdx >= 0 ? String(row[emailIdx]).trim().toLowerCase() : '';
+    const rawEmail   = emailIdx >= 0 ? String(row[emailIdx]).trim().toLowerCase() : '';
     const validEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(rawEmail);
+    const email      = validEmail ? rawEmail : null;
 
-    // Still include in count even without valid email (for preview noEmail count)
-    // but mark email as null so sync step skips them
-    const email = validEmail ? rawEmail : null;
-
-    if (email && seen.has(email)) return; // dedupe by email
+    if (email && seen.has(email)) return;
     if (email) seen.add(email);
 
     matched.push({
       email,
-      fname:   fnameIdx   >= 0 ? String(row[fnameIdx]).trim()   : '',
-      lname:   lnameIdx   >= 0 ? String(row[lnameIdx]).trim()   : '',
+      name:    nameIdx    >= 0 ? String(row[nameIdx]).trim()    : '',
       company: companyIdx >= 0 ? String(row[companyIdx]).trim() : '',
     });
   });
@@ -227,32 +308,26 @@ function _getMatchedContacts(filters) {
   return matched;
 }
 
-
-// ============================================================
-//  INTERNAL — get the configured sheet (throws if missing)
-// ============================================================
-function _getSheet() {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_NAME);
-  if (!sheet) throw new Error(`Sheet "${CONFIG.SHEET_NAME}" not found. Check SHEET_NAME in CONFIG.`);
-  return sheet;
+function _applyTags(emailHash, tags, auth, dc) {
+  const url = `https://${dc}.api.mailchimp.com/3.0/lists/${CONFIG.MC_LIST_ID}/members/${emailHash}/tags`;
+  UrlFetchApp.fetch(url, {
+    method:             'POST',
+    headers:            { 'Authorization': auth, 'Content-Type': 'application/json' },
+    payload:            JSON.stringify({ tags: tags.map(name => ({ name, status: 'active' })) }),
+    muteHttpExceptions: true,
+  });
 }
 
-
-// ============================================================
-//  INTERNAL — MD5 hash (required by MC member endpoint)
-// ============================================================
 function _md5(str) {
   const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, str);
   return bytes.map(b => ('0' + (b & 0xff).toString(16)).slice(-2)).join('');
 }
 
-
-// ============================================================
-//  LOG — writes one row per sync run to a Sync Log tab
-// ============================================================
 function _ensureLogSheet() {
-  const ss  = SpreadsheetApp.getActiveSpreadsheet();
-  let   log = ss.getSheetByName(CONFIG.LOG_SHEET_NAME);
+  const ss  = CONFIG.SPREADSHEET_ID
+    ? SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID)
+    : SpreadsheetApp.getActiveSpreadsheet();
+  let log = ss.getSheetByName(CONFIG.LOG_SHEET_NAME);
   if (!log) {
     log = ss.insertSheet(CONFIG.LOG_SHEET_NAME);
     log.appendRow(['Timestamp', 'Campaign Tag', 'Filters Applied', 'Total Matched', 'Synced OK', 'Skipped', 'Errors']);
