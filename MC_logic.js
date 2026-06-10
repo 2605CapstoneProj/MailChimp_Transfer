@@ -1,35 +1,35 @@
 // ============================================================
-//  CAMPAIGN LAUNCHER — Code.gs
+//  CAMPAIGN LAUNCHER — MailChimp_Sync.gs
 //  Syncs filtered GSheet contacts to Mailchimp via API
 // ============================================================
 
 
 // ============================================================
-//  CONFIG — edit this section before deploying
+//  CONFIG_MC — edit this section before deploying
 // ============================================================
-const CONFIG = {
-  MC_API_KEY:  'YOUR_MC_API_KEY',       // e.g. 'abc123def456-us1'
-  MC_LIST_ID:  'YOUR_AUDIENCE_LIST_ID', // MC > Audience > Settings > Audience ID
+const CONFIG_MC = {
+  MC_API_KEY:  '',       // e.g. 'abc123def456-us1'
+  MC_LIST_ID:  '', // MC > Audience > Settings > Audience ID
 
   // Leave null if this script is bound directly to the sheet (normal case).
   // Fill in the Spreadsheet ID only if the script lives in a different GSheet file.
-  SPREADSHEET_ID: null,                 // e.g. '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms'
+  SPREADSHEET_ID: '',                 // e.g. '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms'
 
-  SHEET_NAME: 'Active Leads',           // exact tab name
+  SHEET_NAME: 'Leads',           // exact tab name
 
   // ── Contact column headers (must match sheet exactly, case-sensitive) ──
   COL_EMAIL:   'Email Address',
-  COL_NAME:    'Name',        // single full-name column → maps to FNAME in MC
-  COL_COMPANY: 'Company',     // set to null if there is no company column
+  COL_NAME:    'Contact Name',        // single full-name column → maps to FNAME in MC
+  COL_COMPANY: 'Business Name',     // set to null if there is no company column
 
   // ── Columns to show as filters in the popup ──
   // Use only columns with consistent, limited values (dropdown-style)
-  FILTERABLE_COLS: ['Machine Type', 'Priority', 'State'],
+  FILTERABLE_COLS: ['Status', 'Equipment', ],
 
   // Values with count ≤ this are flagged amber as possible typos in the UI
   LOW_COUNT_FLAG: 3,
 
-  LOG_SHEET_NAME: 'Sync Log',
+  LOG_SHEET_NAME: 'MailChimp Sync Log',
 };
 
 
@@ -48,7 +48,7 @@ function onOpen() {
 //  OPEN SIDEBAR DIALOG
 // ============================================================
 function openLauncher() {
-  const html = HtmlService.createHtmlOutputFromFile('Dialog')
+  const html = HtmlService.createHtmlOutputFromFile('MC_pop')
     .setWidth(500)
     .setHeight(620);
   SpreadsheetApp.getUi().showModalDialog(html, 'Campaign Launcher');
@@ -61,7 +61,7 @@ function openLauncher() {
 //  Then open the /exec URL in browser
 // ============================================================
 function doGet() {
-  return HtmlService.createHtmlOutputFromFile('TestPanel')
+  return HtmlService.createHtmlOutputFromFile('MC_tester')
     .setTitle('MC Test Panel')
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.DEFAULT);
 }
@@ -79,7 +79,7 @@ function getFilterOptions() {
 
   const result = {};
 
-  CONFIG.FILTERABLE_COLS.forEach(colName => {
+  CONFIG_MC.FILTERABLE_COLS.forEach(colName => {
     const colIdx = headers.indexOf(colName);
     if (colIdx === -1) return;
 
@@ -95,7 +95,7 @@ function getFilterOptions() {
       .map(([value, count]) => ({ value, count }));
   });
 
-  return { options: result, lowCountFlag: CONFIG.LOW_COUNT_FLAG };
+  return { options: result, lowCountFlag: CONFIG_MC.LOW_COUNT_FLAG };
 }
 
 
@@ -118,9 +118,9 @@ function syncToMailchimp(filters, campaignTag) {
   const contacts = _getMatchedContacts(filters).filter(c => c.email);
   if (contacts.length === 0) return { synced: 0, skipped: 0, errors: [] };
 
-  const dc      = CONFIG.MC_API_KEY.split('-').pop();
-  const baseUrl = `https://${dc}.api.mailchimp.com/3.0/lists/${CONFIG.MC_LIST_ID}/members`;
-  const auth    = 'Basic ' + Utilities.base64Encode('anystring:' + CONFIG.MC_API_KEY);
+  const dc      = CONFIG_MC.MC_API_KEY.split('-').pop();
+  const baseUrl = `https://${dc}.api.mailchimp.com/3.0/lists/${CONFIG_MC.MC_LIST_ID}/members`;
+  const auth    = 'Basic ' + Utilities.base64Encode('anystring:' + CONFIG_MC.MC_API_KEY);
   const tags    = campaignTag
     ? campaignTag.split(',').map(t => t.trim()).filter(Boolean)
     : [];
@@ -207,7 +207,7 @@ function testFindContact(email) {
   const { auth, dc } = _mcAuth();
   const hash = _md5(email.trim().toLowerCase());
   const res  = UrlFetchApp.fetch(
-    `https://${dc}.api.mailchimp.com/3.0/lists/${CONFIG.MC_LIST_ID}/members/${hash}` +
+    `https://${dc}.api.mailchimp.com/3.0/lists/${CONFIG_MC.MC_LIST_ID}/members/${hash}` +
     `?fields=email_address,status,merge_fields,tags`,
     { headers: { 'Authorization': auth }, muteHttpExceptions: true }
   );
@@ -234,7 +234,7 @@ function testAddContact(email, name) {
     merge_fields:  { FNAME: name || 'Test Contact' },
   };
   const res  = UrlFetchApp.fetch(
-    `https://${dc}.api.mailchimp.com/3.0/lists/${CONFIG.MC_LIST_ID}/members/${hash}`,
+    `https://${dc}.api.mailchimp.com/3.0/lists/${CONFIG_MC.MC_LIST_ID}/members/${hash}`,
     {
       method:             'PUT',
       headers:            { 'Authorization': auth, 'Content-Type': 'application/json' },
@@ -248,23 +248,32 @@ function testAddContact(email, name) {
   return { ok: true, status: body.status, email: body.email_address };
 }
 
+// Quick Test Call
+function runTests() {
+  console.log('=== Account ===');
+  console.log(JSON.stringify(testGetAccount()));
+  
+  console.log('=== Audiences ===');
+  console.log(JSON.stringify(testListAudiences()));
+}
+
 
 // ============================================================
 //  INTERNAL — helpers
 // ============================================================
 
 function _mcAuth() {
-  const dc   = CONFIG.MC_API_KEY.split('-').pop();
-  const auth = 'Basic ' + Utilities.base64Encode('anystring:' + CONFIG.MC_API_KEY);
+  const dc   = CONFIG_MC.MC_API_KEY.split('-').pop();
+  const auth = 'Basic ' + Utilities.base64Encode('anystring:' + CONFIG_MC.MC_API_KEY);
   return { auth, dc };
 }
 
 function _getSheet() {
-  const ss = CONFIG.SPREADSHEET_ID
-    ? SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID)
+  const ss = CONFIG_MC.SPREADSHEET_ID
+    ? SpreadsheetApp.openById(CONFIG_MC.SPREADSHEET_ID)
     : SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(CONFIG.SHEET_NAME);
-  if (!sheet) throw new Error(`Sheet "${CONFIG.SHEET_NAME}" not found. Check SHEET_NAME in CONFIG.`);
+  const sheet = ss.getSheetByName(CONFIG_MC.SHEET_NAME);
+  if (!sheet) throw new Error(`Sheet "${CONFIG_MC.SHEET_NAME}" not found. Check SHEET_NAME in CONFIG_MC.`);
   return sheet;
 }
 
@@ -274,9 +283,9 @@ function _getMatchedContacts(filters) {
   const headers = data[0];
   const rows    = data.slice(1);
 
-  const emailIdx   = headers.indexOf(CONFIG.COL_EMAIL);
-  const nameIdx    = CONFIG.COL_NAME    ? headers.indexOf(CONFIG.COL_NAME)    : -1;
-  const companyIdx = CONFIG.COL_COMPANY ? headers.indexOf(CONFIG.COL_COMPANY) : -1;
+  const emailIdx   = headers.indexOf(CONFIG_MC.COL_EMAIL);
+  const nameIdx    = CONFIG_MC.COL_NAME    ? headers.indexOf(CONFIG_MC.COL_NAME)    : -1;
+  const companyIdx = CONFIG_MC.COL_COMPANY ? headers.indexOf(CONFIG_MC.COL_COMPANY) : -1;
 
   const seen    = new Set();
   const matched = [];
@@ -309,7 +318,7 @@ function _getMatchedContacts(filters) {
 }
 
 function _applyTags(emailHash, tags, auth, dc) {
-  const url = `https://${dc}.api.mailchimp.com/3.0/lists/${CONFIG.MC_LIST_ID}/members/${emailHash}/tags`;
+  const url = `https://${dc}.api.mailchimp.com/3.0/lists/${CONFIG_MC.MC_LIST_ID}/members/${emailHash}/tags`;
   UrlFetchApp.fetch(url, {
     method:             'POST',
     headers:            { 'Authorization': auth, 'Content-Type': 'application/json' },
@@ -324,12 +333,12 @@ function _md5(str) {
 }
 
 function _ensureLogSheet() {
-  const ss  = CONFIG.SPREADSHEET_ID
-    ? SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID)
+  const ss  = CONFIG_MC.SPREADSHEET_ID
+    ? SpreadsheetApp.openById(CONFIG_MC.SPREADSHEET_ID)
     : SpreadsheetApp.getActiveSpreadsheet();
-  let log = ss.getSheetByName(CONFIG.LOG_SHEET_NAME);
+  let log = ss.getSheetByName(CONFIG_MC.LOG_SHEET_NAME);
   if (!log) {
-    log = ss.insertSheet(CONFIG.LOG_SHEET_NAME);
+    log = ss.insertSheet(CONFIG_MC.LOG_SHEET_NAME);
     log.appendRow(['Timestamp', 'Campaign Tag', 'Filters Applied', 'Total Matched', 'Synced OK', 'Skipped', 'Errors']);
     log.setFrozenRows(1);
     log.getRange(1, 1, 1, 7).setFontWeight('bold');
