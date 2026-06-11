@@ -101,12 +101,19 @@ function getFilterOptions() {
 
 // ============================================================
 //  PREVIEW COUNT
-//  Returns: { total, withEmail, noEmail }
+//  Returns: { total, withEmail, noEmail, hasIncludeFilter }
+//  hasIncludeFilter: false when no Include values are ticked yet —
+//  the UI shows a nudge instead of a silent 0.
 // ============================================================
 function previewContacts(filters) {
-  const all = _getMatchedContacts(filters);
+  const hasIncludeFilter = Object.values(filters).some(spec => {
+    const mode = Array.isArray(spec) ? 'include' : (spec.mode || 'include');
+    const vals = Array.isArray(spec) ? spec       : (spec.values || []);
+    return mode === 'include' && vals.length > 0;
+  });
+  const all       = _getMatchedContacts(filters);
   const withEmail = all.filter(c => c.email).length;
-  return { total: all.length, withEmail, noEmail: all.length - withEmail };
+  return { total: all.length, withEmail, noEmail: all.length - withEmail, hasIncludeFilter };
 }
 
 
@@ -288,10 +295,10 @@ function _getSheet() {
 //
 //  Logic:
 //    • Groups with no selected values are skipped (no constraint).
-//    • Include mode  →  row's cell value must be IN the selected list.
-//    • Exclude mode  →  row's cell value must NOT be in the selected list.
-//    • All active groups must pass (AND across groups).
-//    • Within a single Include group, matching any one value is enough (OR within group).
+//    • Include groups  →  OR across groups (row matches ANY include group)
+//    • Exclude groups  →  AND across groups (row must pass ALL exclude groups)
+//    • Within a single group, matching any one value is enough (OR within group).
+//    • If no include groups are active → 0 results (safe default, never accidentally syncs all).
 // ============================================================
 function _getMatchedContacts(filters) {
   const sheet   = _getSheet();
@@ -303,30 +310,33 @@ function _getMatchedContacts(filters) {
   const nameIdx    = CONFIG_MC.COL_NAME    ? headers.indexOf(CONFIG_MC.COL_NAME)    : -1;
   const companyIdx = CONFIG_MC.COL_BUSNAME ? headers.indexOf(CONFIG_MC.COL_BUSNAME) : -1;
 
+  // Pre-split filters into include / exclude buckets (skips empty groups)
+  const includeFilters = [];
+  const excludeFilters = [];
+
+  Object.entries(filters).forEach(([colName, filterSpec]) => {
+    const mode         = Array.isArray(filterSpec) ? 'include' : (filterSpec.mode || 'include');
+    const selectedVals = Array.isArray(filterSpec) ? filterSpec : (filterSpec.values || []);
+    if (!selectedVals || selectedVals.length === 0) return;
+    const colIdx = headers.indexOf(colName);
+    if (colIdx === -1) return;
+    (mode === 'exclude' ? excludeFilters : includeFilters).push({ colIdx, values: selectedVals });
+  });
+
   const seen    = new Set();
   const matched = [];
 
   rows.forEach(row => {
-    const passes = Object.entries(filters).every(([colName, filterSpec]) => {
+    // Include: at least one include group must be active AND the row must
+    // satisfy at least one of them (OR across groups).
+    // No include groups selected → nobody passes. Safe-by-default.
+    const passesInclude = includeFilters.length > 0
+      && includeFilters.some(f => f.values.includes(String(row[f.colIdx]).trim()));
 
-      // ── Normalise both filter shapes ──────────────────────
-      const mode         = Array.isArray(filterSpec) ? 'include' : (filterSpec.mode || 'include');
-      const selectedVals = Array.isArray(filterSpec) ? filterSpec : (filterSpec.values || []);
+    // Exclude: row must pass every exclude group (AND across groups)
+    const passesExclude = excludeFilters.every(f => !f.values.includes(String(row[f.colIdx]).trim()));
 
-      // No values ticked for this group → no constraint, always passes
-      if (!selectedVals || selectedVals.length === 0) return true;
-
-      const idx = headers.indexOf(colName);
-      if (idx === -1) return true;   // column not found in sheet → skip
-
-      const cellVal = String(row[idx]).trim();
-
-      return mode === 'exclude'
-        ? !selectedVals.includes(cellVal)   // Exclude: must NOT match any selected value
-        :  selectedVals.includes(cellVal);  // Include: must match at least one selected value
-    });
-
-    if (!passes) return;
+    if (!passesInclude || !passesExclude) return;
 
     const rawEmail   = emailIdx >= 0 ? String(row[emailIdx]).trim().toLowerCase() : '';
     const validEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(rawEmail);
