@@ -277,6 +277,22 @@ function _getSheet() {
   return sheet;
 }
 
+// ============================================================
+//  _getMatchedContacts
+//
+//  filters shape (from updated UI):
+//    { colName: { mode: 'include' | 'exclude', values: [...] } }
+//
+//  Legacy shape (plain array) is also accepted for safety:
+//    { colName: [...values] }
+//
+//  Logic:
+//    • Groups with no selected values are skipped (no constraint).
+//    • Include mode  →  row's cell value must be IN the selected list.
+//    • Exclude mode  →  row's cell value must NOT be in the selected list.
+//    • All active groups must pass (AND across groups).
+//    • Within a single Include group, matching any one value is enough (OR within group).
+// ============================================================
 function _getMatchedContacts(filters) {
   const sheet   = _getSheet();
   const data    = sheet.getDataRange().getValues();
@@ -291,11 +307,23 @@ function _getMatchedContacts(filters) {
   const matched = [];
 
   rows.forEach(row => {
-    const passes = Object.entries(filters).every(([colName, selectedVals]) => {
+    const passes = Object.entries(filters).every(([colName, filterSpec]) => {
+
+      // ── Normalise both filter shapes ──────────────────────
+      const mode         = Array.isArray(filterSpec) ? 'include' : (filterSpec.mode || 'include');
+      const selectedVals = Array.isArray(filterSpec) ? filterSpec : (filterSpec.values || []);
+
+      // No values ticked for this group → no constraint, always passes
       if (!selectedVals || selectedVals.length === 0) return true;
+
       const idx = headers.indexOf(colName);
-      if (idx === -1) return true;
-      return selectedVals.includes(String(row[idx]).trim());
+      if (idx === -1) return true;   // column not found in sheet → skip
+
+      const cellVal = String(row[idx]).trim();
+
+      return mode === 'exclude'
+        ? !selectedVals.includes(cellVal)   // Exclude: must NOT match any selected value
+        :  selectedVals.includes(cellVal);  // Include: must match at least one selected value
     });
 
     if (!passes) return;
