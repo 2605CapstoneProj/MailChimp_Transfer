@@ -1,5 +1,5 @@
 // ============================================================
-//  CAMPAIGN LAUNCHER — MailChimp_Sync.gs
+//  MailChimp_Syncer.gs
 //  Syncs filtered GSheet contacts to Mailchimp via API
 // ============================================================
 
@@ -38,7 +38,7 @@ const CONFIG_MC = {
 // ============================================================
 function onOpen() {
   SpreadsheetApp.getUi()
-    .createMenu('📋 Campaign Launcher')
+    .createMenu('🐵 MailChimp Syncer')
     .addItem('Open launcher...', 'openLauncher')
     .addToUi();
 }
@@ -48,10 +48,10 @@ function onOpen() {
 //  OPEN SIDEBAR DIALOG
 // ============================================================
 function openLauncher() {
-  const html = HtmlService.createHtmlOutputFromFile('MC_pop')
+  const html = HtmlService.createHtmlOutputFromFile('MailChimp Syncer_UI')
     .setWidth(500)
     .setHeight(620);
-  SpreadsheetApp.getUi().showModalDialog(html, 'Campaign Launcher');
+  SpreadsheetApp.getUi().showModalDialog(html, '🐵 MailChimp Syncer');
 }
 
 
