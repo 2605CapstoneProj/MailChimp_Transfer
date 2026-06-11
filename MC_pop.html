@@ -19,8 +19,30 @@
     .filter-group {
       border: 1px solid #e5e5e5; border-radius: 6px;
       padding: 10px 12px; margin-bottom: 8px;
+      transition: border-color 0.15s;
     }
-    .filter-group-name { font-size: 13px; font-weight: 600; color: #444; margin-bottom: 8px; }
+    .filter-group.mode-exclude { border-color: #fca5a5; }
+
+    /* Header row: name + Include/Exclude toggle */
+    .filter-group-header {
+      display: flex; align-items: center;
+      justify-content: space-between; margin-bottom: 8px;
+    }
+    .filter-group-name { font-size: 13px; font-weight: 600; color: #444; }
+
+    /* Include / Exclude segmented toggle */
+    .mode-toggle {
+      display: flex; border: 1px solid #e5e5e5;
+      border-radius: 4px; overflow: hidden; font-size: 11px;
+    }
+    .mode-toggle label {
+      padding: 2px 8px; cursor: pointer;
+      color: #aaa; user-select: none;
+    }
+    .mode-toggle label + label { border-left: 1px solid #e5e5e5; }
+    .mode-toggle input[type="radio"] { display: none; }
+    .mode-toggle label.active-include { background: #eff6ff; color: #1d4ed8; font-weight: 600; }
+    .mode-toggle label.active-exclude { background: #fef2f2; color: #c0392b; font-weight: 600; }
 
     .checkbox-row {
       display: flex; align-items: center; gap: 8px;
@@ -29,10 +51,7 @@
     .checkbox-row input { cursor: pointer; flex-shrink: 0; }
     .checkbox-row .val { flex: 1; font-size: 13px; }
     .count { font-size: 12px; color: #aaa; }
-    .count.low {
-      color: #d97706;
-      font-style: italic;
-    }
+    .count.low { color: #d97706; font-style: italic; }
     .low-hint {
       font-size: 11px; color: #d97706; margin-top: 6px;
       padding: 4px 8px; background: #fffbeb;
@@ -91,7 +110,7 @@
 </head>
 <body>
 
-<h3>📋 Campaign Launcher</h3>
+<h3>🐵 MailChimp Syncer</h3>
 <div class="subtitle">Filter contacts → preview → sync to Mailchimp</div>
 
 <div id="loading" class="loading">Loading filter options…</div>
@@ -99,7 +118,7 @@
 
 <div id="main" style="display:none">
 
-  <div class="section-title">Filters <span style="font-weight:400;color:#aaa">(OR within group, AND across groups)</span></div>
+  <div class="section-title">Filters <span style="font-weight:400;color:#aaa">(OR within group · AND across groups · Include or Exclude per group)</span></div>
   <div id="filter-groups"></div>
 
   <div class="section-title">Preview</div>
@@ -132,6 +151,11 @@
 <script>
   var LOW_COUNT_FLAG = 3;
 
+  // Keyed by colName → the toggle <div> for that group.
+  // Used in getSelectedFilters() to avoid CSS selector escaping issues.
+  var modeToggles = {};
+
+
   // ── Load filter options on dialog open ──────────────────────
   google.script.run
     .withSuccessHandler(function(res) {
@@ -160,19 +184,52 @@
       var group   = document.createElement('div');
       group.className = 'filter-group';
 
+      // ── Header: group name + Include / Exclude toggle ──────
+      var header = document.createElement('div');
+      header.className = 'filter-group-header';
+
       var title = document.createElement('div');
       title.className   = 'filter-group-name';
       title.textContent = colName;
-      group.appendChild(title);
 
+      var toggleDiv = document.createElement('div');
+      toggleDiv.className = 'mode-toggle';
+      modeToggles[colName] = toggleDiv;    // store reference for getSelectedFilters
+
+      ['include', 'exclude'].forEach(function(mode) {
+        var lbl = document.createElement('label');
+        var rb  = document.createElement('input');
+        rb.type    = 'radio';
+        rb.name    = 'mode-' + colName;   // name attr only needed for native radio grouping
+        rb.value   = mode;
+        rb.checked = (mode === 'include');
+
+        rb.addEventListener('change', function() {
+          refreshToggleStyle(toggleDiv, group);
+          updatePreview();
+        });
+
+        lbl.appendChild(rb);
+        lbl.appendChild(document.createTextNode(mode === 'include' ? 'Include' : 'Exclude'));
+
+        // Set initial active class
+        if (mode === 'include') lbl.className = 'active-include';
+        toggleDiv.appendChild(lbl);
+      });
+
+      header.appendChild(title);
+      header.appendChild(toggleDiv);
+      group.appendChild(header);
+
+      // ── Checkboxes ────────────────────────────────────────
       values.forEach(function(item) {
-        var row   = document.createElement('label');
+        var row = document.createElement('label');
         row.className = 'checkbox-row';
 
         var cb = document.createElement('input');
-        cb.type           = 'checkbox';
-        cb.dataset.col    = colName;
-        cb.value          = item.value;
+        cb.type         = 'checkbox';
+        cb.dataset.col  = colName;
+        cb.value        = item.value;
         cb.addEventListener('change', updatePreview);
 
         var valSpan = document.createElement('span');
@@ -201,14 +258,37 @@
   }
 
 
+  // ── Refresh toggle label highlighting + group border colour ─
+  function refreshToggleStyle(toggleDiv, group) {
+    var selectedVal = '';
+    toggleDiv.querySelectorAll('label').forEach(function(lbl) {
+      lbl.classList.remove('active-include', 'active-exclude');
+      var rb = lbl.querySelector('input[type="radio"]');
+      if (rb && rb.checked) {
+        selectedVal = rb.value;
+        lbl.classList.add('active-' + rb.value);
+      }
+    });
+    if (group) {
+      group.classList.toggle('mode-exclude', selectedVal === 'exclude');
+    }
+  }
+
+
   // ── Collect currently selected filters ──────────────────────
+  // Returns: { colName: { mode: 'include'|'exclude', values: [...] } }
+  // Only includes groups where at least one checkbox is checked.
   function getSelectedFilters() {
     var filters = {};
     var checked = document.querySelectorAll('input[type="checkbox"]:checked');
     checked.forEach(function(cb) {
       var col = cb.dataset.col;
-      if (!filters[col]) filters[col] = [];
-      filters[col].push(cb.value);
+      if (!filters[col]) {
+        var toggleDiv = modeToggles[col];
+        var modeRb    = toggleDiv ? toggleDiv.querySelector('input[type="radio"]:checked') : null;
+        filters[col]  = { mode: modeRb ? modeRb.value : 'include', values: [] };
+      }
+      filters[col].values.push(cb.value);
     });
     return filters;
   }
